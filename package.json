@@ -1,6 +1,6 @@
 {
   "name": "yasws",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Yet Another Simple Web Server",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,12 +9,8 @@
     "publish": "npm publish",
     "clean": "rm -rf dist"
   },
-  "keywords": [
-    "typescript",
-    "webserver"
-  ],
   "author": "Alex <aliakseych@gmail.com>",
-  "license": "GPLv3",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "devDependencies": {
     "@types/node": "^24.3.0",

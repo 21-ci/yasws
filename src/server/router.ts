@@ -139,7 +139,7 @@ class Router {
 
             // Checking filters of handler, and if it matches - handle the request via it
             for (const filter of handler.filters) {
-                const filterResult: boolean = filter.call(request.clientRequest)
+                const filterResult: boolean = filter.call(request)
                 // Skipping this handler, if some of the filters fail (return false)
                 if (filterResult === false) {
                     this.logger.debug(`FAILED: ${filter.constructor.name} filter`)

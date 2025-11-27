@@ -1,7 +1,7 @@
-import http from "node:http"
+import type { Request } from "./request.js"
 
 export type { Filter }
 
 interface Filter {
-    call(request: http.IncomingMessage): boolean
+    call(request: Request): boolean
 }
