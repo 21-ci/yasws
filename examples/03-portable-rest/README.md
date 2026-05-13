@@ -62,6 +62,19 @@ curl -X DELETE http://localhost:8000/users/1                        # 204
 
 ## Run on WASI
 
+First of all, install `wkg` with `cargo`
+
+```sh
+cargo install wkg
+```
+
+Afterward, install all dependencies with `wkg`
+
+```sh
+wkg wit fetch
+```
+
+Then you can run the build sequence
 
 ```sh
 npm run build:wasi

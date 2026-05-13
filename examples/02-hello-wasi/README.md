@@ -32,6 +32,19 @@ Everything else (`jco`, `componentize-js`, `esbuild`, `typescript`) is a devDep 
 
 ## Build
 
+First of all, install `wkg` with `cargo`
+
+```sh
+cargo install wkg
+```
+
+Afterward, install all dependencies with `wkg`
+
+```sh
+wkg wit fetch
+```
+
+Then you can run the build sequence
 ```sh
 npm install
 npm run build
@@ -90,7 +103,7 @@ curl -X POST http://localhost:8080/echo \
                            │  └────────────────┘  │
                            │       │              │
                            │       ▼              │
-                           │  yasswsWasiHttpHandle │ ← converts WASI req → YasswsRequest
+                           │ yasswsWasiHttpHandle │ ← converts WASI req → YasswsRequest
                            │       │              │
                            │       ▼              │
                            │  HelloController     │
