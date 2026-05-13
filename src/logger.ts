@@ -1,138 +1,131 @@
-import fs from "node:fs/promises"
+import type { FileHandle } from "node:fs/promises"
 
 import type { Middleware } from "./server/middleware.js"
-import type { Request } from "./server/request.js"
+import type { YasswsRequest } from "./server/request.js"
 
 export { Logger, defaultLogger, LogLevel, LogMode, LoggerMiddleware }
 
+// Built at runtime so static bundlers (esbuild, componentize-js) don't try to
+// resolve `node:fs/promises` at bundle/link time. The module is only loaded
+// when the user explicitly asks for a log file — letting yasws bundle cleanly
+// for WASI components, which have no fs module.
+const FS_MODULE_SPECIFIER = ["node:", "fs/promises"].join("")
+let fsPromisesModule: typeof import("node:fs/promises") | undefined
+async function loadFsPromises(): Promise<typeof import("node:fs/promises")> {
+    if (!fsPromisesModule) {
+        fsPromisesModule = (await import(FS_MODULE_SPECIFIER)) as typeof import("node:fs/promises")
+    }
+    return fsPromisesModule
+}
+
 enum LogMode {
     PROD = "PROD",
-    DEV = "DEBUG"
+    DEV = "DEBUG",
 }
 
 enum LogLevel {
     ERROR = "ERROR",
     INFO = "INFO",
     WARNING = "WARNING",
-    DEBUG = "DEBUG"
+    DEBUG = "DEBUG",
 }
 
 enum LogColor {
-    ERROR = "31", // red
-    INFO = "32", // green
-    WARNING = "33", // yellow
-    DEBUG = "34" // blue
+    ERROR = "31",
+    INFO = "32",
+    WARNING = "33",
+    DEBUG = "34",
 }
 
 class Logger {
-    logLevel: LogLevel[] = []
-    logFilePath: fs.FileHandle | undefined
-    useColor: boolean = true
+    public logLevel: LogLevel[] = []
+    public logFilePath: FileHandle | undefined
+    public useColor: boolean = true
+
+    private writeQueue: Promise<void> = Promise.resolve()
 
     public async config(logLevel?: LogLevel[], logFilePath?: string, useColor: boolean = true): Promise<void> {
-        // Checking if LogLevel have been provided, and writing them
-        if (logLevel) {
-            this.logLevel = logLevel
-        }
-        // Checking if log filepath was provided and creating / opening this file
+        if (logLevel) this.logLevel = logLevel
         if (logFilePath) {
+            const fs = await loadFsPromises()
             this.logFilePath = await fs.open(logFilePath, "a")
         }
         this.useColor = useColor
     }
 
     public async setMode(logMode: LogMode = LogMode.DEV): Promise<void> {
-        // Checking if LogLevel have been provided, and writing them
-        if (logMode == LogMode.PROD) {
-            const prodLogLevel: LogLevel[] = [LogLevel.INFO, LogLevel.ERROR]
-            await this.config(prodLogLevel)
-        } else if (logMode == LogMode.DEV) {
-            const devLogLevel: LogLevel[] = [LogLevel.INFO, LogLevel.DEBUG, LogLevel.ERROR, LogLevel.WARNING]
-            await this.config(devLogLevel)
+        if (logMode === LogMode.PROD) {
+            await this.config([LogLevel.INFO, LogLevel.ERROR, LogLevel.WARNING])
+        } else {
+            await this.config([LogLevel.INFO, LogLevel.DEBUG, LogLevel.ERROR, LogLevel.WARNING])
         }
     }
 
-    private async printWrite(message: string): Promise<void> {
-        // Outputting message to console
+    private printWrite(message: string): void {
         console.log(message)
-        // If log file is specified, write to it
-        if (this.logFilePath) {
-            try {
-                await this.logFilePath.write(`${message}\n`);
-            } catch (error) {
-                console.error(`Error writing to log file ${this.logFilePath}: ${error}`);
-                throw error;
-            }
-        }
+        if (!this.logFilePath) return
+        const fh = this.logFilePath
+        this.writeQueue = this.writeQueue.then(
+            () =>
+                fh
+                    .write(`${message}\n`)
+                    .then(() => undefined)
+                    .catch((err) => {
+                        console.error(`yasws logger write failed: ${String(err)}`)
+                    })
+        )
     }
 
     private colorMessage(level: LogLevel, message: string): string {
-        const logColor: LogColor = LogColor[level]
-
-        message = `\u001b[${logColor}m${message}\u001b[0m`
-
-        return message
+        const c = LogColor[level]
+        return `[${c}m${message}[0m`
     }
 
     private formatMessage(level: LogLevel, message: string): string {
         const date: string = new Date().toISOString()
-        // Coloring the string (set to true by default)
-        if (this.useColor) {
-            message = this.colorMessage(level, message)
-        }
-        const formattedMessage = `[${level}] [${date}] ${message}`
-        return formattedMessage
+        const colored = this.useColor ? this.colorMessage(level, message) : message
+        return `[${level}] [${date}] ${colored}`
     }
 
     public info(message: string): void {
-        const level: LogLevel = LogLevel.INFO
-        if (this.logLevel.includes(level)) {
-            const formattedMessage: string = this.formatMessage(level, message)
-            this.printWrite(formattedMessage)
-        }
+        if (this.logLevel.includes(LogLevel.INFO)) this.printWrite(this.formatMessage(LogLevel.INFO, message))
     }
-    
     public warning(message: string): void {
-        const level: LogLevel = LogLevel.WARNING
-        if (this.logLevel.includes(level)) {
-            const formattedMessage: string = this.formatMessage(level, message)
-            this.printWrite(formattedMessage)
-        }
+        if (this.logLevel.includes(LogLevel.WARNING)) this.printWrite(this.formatMessage(LogLevel.WARNING, message))
     }
-    
     public error(message: string, error?: string): void {
-        const level: LogLevel = LogLevel.ERROR
-        if (this.logLevel.includes(level)) {
-            const formattedMessage: string = this.formatMessage(level, message)
-            this.printWrite(formattedMessage)
-            if (error) {
-                this.printWrite(error)
-            }
-        }
+        if (!this.logLevel.includes(LogLevel.ERROR)) return
+        this.printWrite(this.formatMessage(LogLevel.ERROR, message))
+        if (error) this.printWrite(error)
+    }
+    public debug(message: string): void {
+        if (this.logLevel.includes(LogLevel.DEBUG)) this.printWrite(this.formatMessage(LogLevel.DEBUG, message))
     }
 
-    public debug(message: string): void {
-        const level: LogLevel = LogLevel.DEBUG
-        if (this.logLevel.includes(level)) {
-            const formattedMessage: string = this.formatMessage(level, message)
-            this.printWrite(formattedMessage)
-        }
+    /** Awaitable flush of pending log file writes. */
+    public async flush(): Promise<void> {
+        await this.writeQueue
     }
 }
 
 const defaultLogger: Logger = new Logger()
-// Setting up the default logger
-const defaultLogMode: LogMode = LogMode.DEV
-defaultLogger.setMode(defaultLogMode)
+defaultLogger.setMode(LogMode.DEV)
 
-class LoggerMiddleware extends Logger implements Middleware  {
-  constructor () {
-    super()
-  }
+/**
+ * Optional middleware that attaches a Logger to request.args.logger for handlers
+ * that explicitly read it that way. v2 also exposes `request.logger` directly on
+ * every dispatched request, so this is rarely needed.
+ */
+class LoggerMiddleware implements Middleware {
+    private readonly logger: Logger
 
-  public call(request: Request): Request {
-    // Passing some argument to request, which was given in Middleware constructor
-    request.args.logger = defaultLogger
-    return request
-  }
+    public constructor(logger: Logger = defaultLogger) {
+        this.logger = logger
+    }
+
+    public call(request: YasswsRequest): YasswsRequest {
+        request.args.logger = this.logger
+        request.logger = this.logger
+        return request
+    }
 }
