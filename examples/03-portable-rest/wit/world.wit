@@ -1,0 +1,5 @@
+package yasws:app;
+
+world app {
+  include wasi:http/proxy@0.2.10;
+}

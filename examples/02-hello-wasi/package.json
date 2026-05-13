@@ -1,0 +1,25 @@
+{
+  "name": "yasws-example-hello-wasi",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build:ts": "tsc -p tsconfig.json",
+    "build:bundle": "esbuild dist/index.js --bundle --format=esm --platform=node --target=es2022 --external:wasi:* --outfile=build/bundle.js",
+    "build:wasm": "jco componentize build/bundle.js --wit wit/ --world-name app --out build/app.wasm",
+    "build": "npm run build:ts && npm run build:bundle && npm run build:wasm",
+    "serve": "wasmtime serve -Scli --addr 0.0.0.0:8080 build/app.wasm",
+    "clean": "rm -rf dist build"
+  },
+  "dependencies": {
+    "yasws": "file:../.."
+  },
+  "devDependencies": {
+    "@bytecodealliance/preview2-shim": "0.17.9",
+    "@bytecodealliance/componentize-js": "0.20.0",
+    "@bytecodealliance/jco": "1.19.0",
+    "@types/node": "^24.3.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.9.2"
+  }
+}
