@@ -1,6 +1,6 @@
-# 02 — Hello, WASI HTTP
+# 01 — Hello World, WASI HTTP (+ Node)
 
-The same handler as `01-hello-node`, but compiled to a WebAssembly Component and served by `wasmtime serve` over the `wasi:http/incoming-handler@0.2.8` interface.
+WASI-focused example: the handler is compiled to a WebAssembly Component and served by `wasmtime serve` over the `wasi:http/incoming-handler@0.2.10` interface. The same `buildApp()` is also exposed via `node:http` for quick iteration without rebuilding the wasm.
 
 ## Prerequisites
 
@@ -20,53 +20,65 @@ Everything else (`jco`, `componentize-js`, `esbuild`, `typescript`) is a devDep 
 .
 ├── package.json               # build/serve scripts
 ├── tsconfig.json              # NodeNext + decorators
-├── wit/world.wit              # `include wasi:http/proxy@0.2.8`
-└── src/index.ts               # handler + WASI export
+├── wit/world.wit              # `include wasi:http/proxy@0.2.10`
+└── src/
+    ├── app.ts                 # buildApp() — Dispatcher + HelloController
+    ├── node.ts                # Node entry (YASWSNodeHTTP)
+    └── wasi.ts                # WASI entry — exports incomingHandler.handle
 ```
 
-`src/index.ts` does three things:
+`src/wasi.ts` does three things:
 
-1. Imports `wasi:http/types@0.2.8` (host-resolved at link time).
-2. Builds a `Dispatcher` exactly like the node example.
+1. Imports `wasi:http/types@0.2.10` (host-resolved at link time).
+2. Calls `buildApp()` — the same dispatcher used by `node.ts`.
 3. Exports `incomingHandler` — that name is what the WIT world expects.
 
-## Build
+## Install
 
-First of all, install `wkg` with `cargo`
-
-```sh
-cargo install wkg
-```
-
-Afterward, install all dependencies with `wkg`
-
-```sh
-wkg wit fetch
-```
-
-Then you can run the build sequence
 ```sh
 npm install
-npm run build
 ```
 
-The `build` script runs three steps in order:
+If your `wasmtime` version doesn't ship the `wasi:http` WIT package, fetch the WITs with `wkg`:
+
+```sh
+cargo install wkg          # one-time
+wkg wit fetch              # populate wit/deps
+```
+
+## Run on Node (fast iteration)
+
+```sh
+npm run build:node         # tsc
+npm run start:node         # node --enable-source-maps dist/node.js
+```
+
+Smoke test on `http://localhost:8080`:
+
+```sh
+curl http://localhost:8080/
+curl http://localhost:8080/hi/world
+curl -X POST http://localhost:8080/echo -d '{"a":1,"b":[2,3]}' -H "content-type: application/json"
+```
+
+## Run on WASI
+
+```sh
+npm run build:wasi         # tsc → esbuild → jco componentize
+npm run serve:wasi         # wasmtime serve build/app.wasm
+```
+
+`build:wasi` runs three steps in order:
 
 | Step | Tool | Why |
 | --- | --- | --- |
 | `build:ts` | `tsc` | Compiles `src/*.ts` → `dist/*.js`. |
-| `build:bundle` | `esbuild` | Bundles `dist/index.js` (and its `yasws` import) into a **single ESM file** with `wasi:*` left as bare imports. componentize-js cannot resolve npm imports itself. |
+| `build:bundle` | `esbuild` | Bundles `dist/wasi.js` (and its `yasws` import) into a **single ESM file** with `wasi:*` left as bare imports. componentize-js cannot resolve npm imports itself. |
 | `build:wasm` | `jco componentize` | Runs componentize-js (SpiderMonkey + the JS in a Wizer snapshot) against the bundle, producing `build/app.wasm` — a real WASI HTTP component. |
 
 Output: `build/app.wasm` (typically 6–10 MB; that's the SpiderMonkey snapshot baked in).
 
-## Run
-
-```sh
-npm run serve
-```
-
-Internally:
+Internally `npm run serve:wasi` runs:
 
 ```sh
 wasmtime serve -Scli --addr 0.0.0.0:8080 build/app.wasm

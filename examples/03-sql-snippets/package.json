@@ -1,25 +1,27 @@
 {
-  "name": "yasws-example-portable-rest",
+  "name": "yasws-example-sql-snippets",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "build:ts": "tsc -p tsconfig.json",
-    "build:bundle": "esbuild dist/wasi.js --bundle --format=esm --platform=node --target=es2022 --external:wasi:* --outfile=build/bundle.js",
+    "build:bundle": "esbuild dist/wasi.js --bundle --format=esm --platform=node --target=es2022 --conditions=workerd,worker,browser --external:wasi:* --alias:ws=./wasi-stubs/ws.js --outfile=build/bundle.js",
     "build:wasm": "jco componentize build/bundle.js --wit wit/ --world-name app --out build/app.wasm",
     "build:node": "npm run build:ts",
     "build:wasi": "npm run build:ts && npm run build:bundle && npm run build:wasm",
     "build": "npm run build:wasi",
     "start:node": "node --enable-source-maps dist/node.js",
-    "serve:wasi": "wasmtime serve -Scli --addr 0.0.0.0:8000 build/app.wasm",
+    "serve:wasi": "wasmtime serve -Scli -Shttp --addr 0.0.0.0:8000 build/app.wasm",
+    "dev:db": "turso dev --port 8081",
     "clean": "rm -rf dist build"
   },
   "dependencies": {
-    "yasws": "file:../.."
+    "@libsql/client": "^0.14.0",
+    "yasws": "^2.0.0"
   },
   "devDependencies": {
-    "@bytecodealliance/componentize-js": "^0.18.0",
-    "@bytecodealliance/jco": "^1.8.0",
+    "@bytecodealliance/componentize-js": "^0.20.0",
+    "@bytecodealliance/jco": "^1.19.0",
     "@types/node": "^24.3.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.9.2"

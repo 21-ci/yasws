@@ -9,11 +9,12 @@
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "experimentalDecorators": true,
-    "useDefineForClassFields": false,
+    "emitDecoratorMetadata": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "resolveJsonModule": true,
     "sourceMap": true,
     "declaration": false
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*.ts"]
 }
