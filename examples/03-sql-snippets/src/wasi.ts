@@ -24,9 +24,14 @@ import { wasiDefaults } from "./infra/config.js"
 
 const { app } = buildApp({ dbUrl: wasiDefaults.dbUrl })
 const handler = app.toHandler()
+let started = false
 
 export const incomingHandler = {
     async handle(request: WasiIncomingRequest, responseOut: WasiResponseOutparam) {
+        if (!started) {
+            await app.start()    // runs onStart → initSchema + seed
+            started = true
+        }
         await yasswsWasiHttpHandle(handler, request, responseOut, wasiHttpTypes)
     },
 }
