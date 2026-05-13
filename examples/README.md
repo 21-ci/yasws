@@ -90,9 +90,3 @@ For production you'd swap `wasmtime serve` for an embedded host (e.g. Rust + the
 - **`componentize-js: SpiderMonkey panicked`** — usually means your bundle still has a `require(…)` or unresolved import. Run `esbuild` with `--format=esm` and `--external:wasi:*`.
 - **`wasmtime serve` 500s on every request** — run with `WASMTIME_LOG=trace wasmtime serve …` to see the guest stderr. JS exceptions inside the component land there.
 - **WIT version mismatch** — wasmtime serve currently ships `wasi:http@0.2.x`. Make sure your `wit/world.wit` and the `wasi:http/types@0.2.8` import string in code match wasmtime's version. `wasmtime --version` against the [release notes](https://github.com/bytecodealliance/wasmtime/releases) tells you which.
-
-## Where to go next
-
-- [`../AGENTS.md`](../AGENTS.md) — full architecture reference (AI-readable).
-- [`../MIGRATION.md`](../MIGRATION.md) — upgrading a v1 app.
-- [`../SECURITY_PROPOSAL.md`](../SECURITY_PROPOSAL.md) — what the security baseline does and why.
