@@ -1,4 +1,4 @@
-export { Method };
+export { Method, isMethod, normalizeMethod }
 
 enum Method {
     GET = "GET",
@@ -8,5 +8,17 @@ enum Method {
     PATCH = "PATCH",
     HEAD = "HEAD",
     OPTIONS = "OPTIONS",
-    TRACES = "TRACES"
+    TRACE = "TRACE",
+    CONNECT = "CONNECT",
+    ALL = "*",
+}
+
+const KNOWN: Set<string> = new Set(Object.values(Method))
+
+function isMethod(s: string): s is Method {
+    return KNOWN.has(s.toUpperCase())
+}
+
+function normalizeMethod(s: string | Method): string {
+    return s.toUpperCase()
 }

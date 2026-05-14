@@ -1,271 +1,355 @@
-import http from "node:http"
-
-import { normalizePath, addEndSlash } from "./helpers.js"
-import { Method } from "./method.js"
-import type { Handler } from "./handler.js"
+import { matchPath } from "./params.js"
+import { normalizePath, addEndSlash, removeEndSlash } from "./helpers.js"
+import { Method, normalizeMethod } from "./method.js"
+import { YasswsRequest } from "./request.js"
+import { YasswsResponse, isResponse, toResponse } from "./response.js"
 import type { Filter } from "./filter.js"
-import type { HandlerResponse } from "./response.js"
-import { isResponse } from "./response.js"
 import type { Middleware } from "./middleware.js"
-import type { Request } from "./request.js"
+import type { Handler, HandlerFunction, HandlerSpec } from "./handler.js"
 import type { Header } from "./header.js"
-import { defaultLogger, Logger, LoggerMiddleware } from "../logger.js"
+import { defaultLogger, type Logger } from "../logger.js"
+import { getMeta, type HandlerMetadata } from "./metadata.js"
+import { BadRequestError } from "./errors.js"
 
-export { Router, Route }
+export { Router, Route, type RouterOptions, type ResponseInterceptor, UNHANDLED }
+
+/** Sentinel returned by `Router.handle` when no handler matched. */
+const UNHANDLED: unique symbol = Symbol("yasws.unhandled")
+
+type ResponseInterceptor = (request: YasswsRequest, response: YasswsResponse) => YasswsResponse | Promise<YasswsResponse>
+
+interface RouterOptions {
+    name?: string
+    rootPath?: string
+    dispatcherPath?: string
+    logger?: Logger
+    defaultHeaders?: Header[]
+}
 
 class Router {
-    name: string | undefined
-    rootPath: string
-    dispatcherPath: string
-    fullPath: string
-    defaultHeaders: Header[]
+    public name: string | undefined
+    public rootPath: string
+    public dispatcherPath: string
+    public fullPath: string
+    public defaultHeaders: Header[]
     public logger: Logger
-    private handlers: Handler[]
-    private subrouters: Router[]
-    private middlewares: Middleware[]
+    protected handlers: Handler[]
+    protected subrouters: Router[]
+    protected middlewares: Middleware[]
+    protected responseInterceptors: ResponseInterceptor[]
 
-    public constructor(
-        {name, rootPath, dispatcherPath, logger, defaultHeaders}: 
-        {name?: string,
-        rootPath?: string | undefined,
-        dispatcherPath?: string | undefined,
-        logger?: Logger | undefined,
-        defaultHeaders?: Header[]}
-    ) {
-        // Setting up paths
-        this.rootPath = normalizePath(rootPath ??= "")
-        this.dispatcherPath = normalizePath(dispatcherPath ??= "")
-
-        // Setting up logger
-        this.logger = logger ??= defaultLogger
-
-        // Setting default parameters of router
-        this.name = name
+    public constructor(opts: RouterOptions = {}) {
+        const controllerRoot = (this.constructor as { _controllerRootPath?: string })._controllerRootPath
+        this.rootPath = normalizePath(opts.rootPath ?? controllerRoot ?? "")
+        this.dispatcherPath = normalizePath(opts.dispatcherPath ?? "")
+        this.logger = opts.logger ?? defaultLogger
+        this.name = opts.name
         this.fullPath = `${this.dispatcherPath}${this.rootPath}`
-        this.handlers = []
+        this.defaultHeaders = opts.defaultHeaders ? [...opts.defaultHeaders] : []
         this.subrouters = []
         this.middlewares = []
-        this.defaultHeaders = defaultHeaders ??= []
+        this.responseInterceptors = []
+        this.handlers = collectDecoratorHandlers(this.constructor)
+        for (const h of this.handlers) h.instance = this
 
-        // Register all decorators
-        this.registerRoutes()
-
-        // Registring default middleware
-        this.addMiddleware(new LoggerMiddleware())
-    }
-
-    private async registerRoutes(): Promise<void> {
-        // Getting constructor, and casting it's type to any, so TS don't blast with errors
-        const routerConstructor = this.constructor as any
-        // Getting routes, that was added via router decorator as a list
-        this.handlers = routerConstructor._handlers || []
-        
         if (this.handlers.length > 0) {
-            this.logger.debug(`* Registered handlers to router ${this.constructor.name}`)
-
-            // Writing to DEBUG names, paths and methods of handler functions
-            let handlersMessage = `\n* Handlers, registered to router ${this.constructor.name}:\n`
-            for (const handler of this.handlers) {
-                handlersMessage += `- ${handler.path || "/"}: ${handler.function.name} (${handler.method})\n`
-            }
-            this.logger.debug(handlersMessage)
+            const lines = this.handlers.map(h => `- ${h.path || "/"}: ${h.function.name || "anonymous"} (${h.method})`)
+            this.logger.debug(`* Router ${this.constructor.name} (path "${this.fullPath}") has ${this.handlers.length} handler(s):\n${lines.join("\n")}`)
         }
     }
 
-    public async addRouter <RouterChild extends Router> (router: RouterChild): Promise<void> {
-        // Changing dispatcher path on added router to this router root path, so it's identified as a root router
+    public addRouter<R extends Router>(router: R): this {
         router.dispatcherPath = `${this.dispatcherPath}${this.rootPath}`
-        this.subrouters.push(router);
-
-        // Add default headers to new subrouter
-        router.defaultHeaders.push(...this.defaultHeaders)
-
-        const routerName: string = router.name ??= router.constructor.name
-        const subrouterFullPath = `${router.dispatcherPath}${router.rootPath}`
-        router.fullPath = subrouterFullPath
-        this.logger.debug(`% Added router ${routerName} to ${this.constructor.name} (path ${subrouterFullPath})`)
+        router.fullPath = `${router.dispatcherPath}${router.rootPath}`
+        router.defaultHeaders = [...this.defaultHeaders, ...router.defaultHeaders]
+        for (const sub of router.subrouters) Router.rebasePaths(sub, router.fullPath)
+        this.subrouters.push(router)
+        this.logger.debug(`% Added router ${router.name ?? router.constructor.name} to ${this.constructor.name} (path "${router.fullPath}")`)
+        return this
     }
 
-    public async addMiddleware <MiddlewareChild extends Middleware> (middleware: MiddlewareChild): Promise<void> {
-        // Changing dispatcher path on added router to this router root path, so it's identified as a root router
-        this.middlewares.push(middleware);
-
-        const middlewareName: string = middleware.constructor.name
-        this.logger.debug(`% Added middleware ${middlewareName} to ${this.constructor.name}`)
+    private static rebasePaths(router: Router, newDispatcherPath: string): void {
+        router.dispatcherPath = newDispatcherPath
+        router.fullPath = `${router.dispatcherPath}${router.rootPath}`
+        for (const sub of router.subrouters) Router.rebasePaths(sub, router.fullPath)
     }
 
-    public getRequestPath(request: http.IncomingMessage): string {
-        const requestURL: string = request.url ??= ""
-        const url = new URL(requestURL, `http://${request.headers.host}`)
-        const requestPath: string = addEndSlash(url.pathname)  
-        
-        return requestPath
+    public addMiddleware<M extends Middleware>(middleware: M): this {
+        this.middlewares.push(middleware)
+        this.logger.debug(`% Added middleware ${middleware.constructor.name} to ${this.constructor.name}`)
+        return this
     }
 
-    public async handleEvent(request: Request, response: http.ServerResponse): Promise<Request | boolean> {     
-        this.logger.info(`Recieved ${request.clientRequest.method} request on ${request.path}`)
+    public addResponseInterceptor(interceptor: ResponseInterceptor): this {
+        this.responseInterceptors.push(interceptor)
+        return this
+    }
 
-        // Initializing request class, which will be used by middlewares and handler
-        // args is a list, which may be used by middleware to pass back arguments
-
-        // Going through pre-route middlewares (when the matchind handler hadn't been found)
-        for (const middleware of this.middlewares) {
-            // Checking if this middleware is pre-route
-            if (middleware.call) {
-                const preRouteRequest: Request | void = middleware.call(request)
-
-                // If handling the request was stopped by middleware - stop the handling fully
-                if (!preRouteRequest) {
-                    return false
-                // Else - resign main request to new version from the middleware 
-                } else {
-                    request = preRouteRequest
-                }
-            }
+    /**
+     * Walk every handler in this router and its sub-routers, yielding the
+     * fully-qualified path (relative to the dispatcher root), method, and the
+     * underlying Handler. Used by OpenAPI generation and route introspection.
+     */
+    public *walkRoutes(): IterableIterator<{ method: string; fullPath: string; handler: Handler; router: Router }> {
+        for (const h of this.handlers) {
+            const fullPath = joinPath(this.fullPath, h.path)
+            yield { method: h.method, fullPath, handler: h, router: this }
         }
+        for (const sub of this.subrouters) yield* sub.walkRoutes()
+    }
+
+    /** Imperative handler registration (alternative to `@Route` decorator). */
+    public addHandler(spec: HandlerSpec): this {
+        const path = normalizeHandlerPath(spec.path ?? "")
+        this.handlers.push({
+            path,
+            method: normalizeMethod(spec.method ?? Method.GET),
+            filters: spec.filters ?? [],
+            middlewares: spec.middlewares ?? [],
+            function: spec.function,
+        })
+        return this
+    }
+
+    /**
+     * Try to handle a request. Returns:
+     *  - YasswsResponse on success or short-circuit
+     *  - UNHANDLED sentinel if no handler in this router (or its subrouters) matched
+     *
+     * Exceptions propagate to the Dispatcher's onError hook.
+     */
+    public async handle(request: YasswsRequest): Promise<YasswsResponse | typeof UNHANDLED> {
+        if (!pathMatchesPrefix(request.path, this.fullPath)) return UNHANDLED
+
+        this.logger.debug(`* ${this.constructor.name} considering ${request.method} ${request.path}`)
+
+        // Pre-route middlewares
+        for (const m of this.middlewares) {
+            if (!m.call) continue
+            const r = await m.call(request)
+            if (r instanceof YasswsResponse) return this.runInterceptors(request, r)
+            if (r === false || r === null) return UNHANDLED
+            if (r instanceof YasswsRequest) request = r
+        }
+
+        const remainder = stripPrefix(request.path, this.fullPath)
 
         handlerLoop: for (const handler of this.handlers) {
-            this.logger.debug(`* Checking if ${handler.function.name} (${handler.method}, ${handler.path}) is a match`)
-            // Checking if paths match
-            const handlerFullPath = `${this.fullPath}${handler.path}`
-            if (request.path != handlerFullPath) {
-                continue
-            }
+            const params = matchPath(handler.path, remainder)
+            if (!params) continue
+            if (handler.method !== Method.ALL && handler.method !== request.method) continue
 
-            // Checking if methods match
-            if (request.clientRequest.method != handler.method) {
-                continue
-            }
+            request.params = params
 
-            // Checking filters of handler, and if it matches - handle the request via it
+            // Filters (async)
             for (const filter of handler.filters) {
-                const filterResult: boolean = filter.call(request)
-                // Skipping this handler, if some of the filters fail (return false)
-                if (filterResult === false) {
-                    this.logger.debug(`FAILED: ${filter.constructor.name} filter`)
+                const ok = await filter.call(request)
+                if (!ok) {
+                    this.logger.debug(`FAILED filter ${filter.constructor.name} on ${handler.path}`)
                     continue handlerLoop
                 }
-                this.logger.debug(`PASS: ${filter.constructor.name} filter`)
             }
 
-            // Executing posts-route middlewares (when the matchind handler has been found)
-            for (const middleware of this.middlewares) {
-                // Checking if this middleware is post-route
-                if (middleware.postRoute) {
-                    const postRouteRequest: Request | void = middleware.postRoute(request)
+            // Per-handler middlewares
+            for (const m of handler.middlewares) {
+                if (!m.call) continue
+                const r = await m.call(request)
+                if (r instanceof YasswsResponse) return this.runInterceptors(request, r)
+                if (r === false || r === null) return UNHANDLED
+                if (r instanceof YasswsRequest) request = r
+            }
 
-                    // If handling the request was stopped by middleware - stop the handling fully
-                    if (!postRouteRequest) {
-                        return false
-                    // Else - resign main request to new version from the middleware 
-                    } else {
-                        request = postRouteRequest
-                    }
+            // Router-level post-route middlewares
+            for (const m of this.middlewares) {
+                if (!m.postRoute) continue
+                const r = await m.postRoute(request)
+                if (r instanceof YasswsResponse) return this.runInterceptors(request, r)
+                if (r === false || r === null) return UNHANDLED
+                if (r instanceof YasswsRequest) request = r
+            }
+
+            const meta = getMeta(handler.function)
+
+            let result: unknown
+            try {
+                if (meta?.redirect) {
+                    result = YasswsResponse.redirect(meta.redirect.location, meta.redirect.statusCode)
+                } else {
+                    const args = await resolveHandlerArgs(handler.function, meta, request)
+                    result = await handler.function.apply(handler.instance ?? null, args as [YasswsRequest])
                 }
+            } catch (err) {
+                const handled = await runHandlerExceptionFilters(meta, err, request)
+                if (handled) {
+                    const response = toResponse(handled)
+                    applyDefaultHeaders(response, this.defaultHeaders)
+                    return this.runInterceptors(request, response)
+                }
+                throw err
             }
 
-            // Executing the handler, if all of it's filters passed
-            const handlerResponse: HandlerResponse = await handler.function(request)
-
-            // Checking if the handler has returned response, if not - skip this handler
-            // TODO: Replace with returning 5xx error
-            if (!isResponse(handlerResponse)) {
-                continue 
+            if (!isResponse(result)) {
+                this.logger.warning(`handler ${handler.function.name || "anonymous"} returned no response; falling through`)
+                continue
             }
 
-            this.sendResponse(response, handlerResponse, request.path)
-            this.logger.debug(`SUCCESS: returned a response`)
-            return true
+            const response = toResponse(result)
+            applyMethodDecoratorEffects(response, meta)
+            applyDefaultHeaders(response, this.defaultHeaders)
+            return this.runInterceptors(request, response)
         }
 
-        // Considering, if we should handle it by subrouters (if they exist)
-        if (this.subrouters.length) {
-            // Checking subrouters' handlers for a match
-            const eventHandled: Request | boolean = await this.handleBySubrouters(request, response, request.path)
-
-            if (typeof eventHandled === "boolean") {
-                // Return boolean value if event or hasn't been handled (because of middleware closing the request)
-                this.logger.debug("DECLINED: request was unhandled, because middleware or router stopped handling")
-                return eventHandled
-            } else {
-                // If it hasn't been handled, because no matchin handler was found - return the request,
-                // to be handled by function handleUnhandled
-                this.logger.debug("UNHANDLED BY SUBROUTERS: request was unhandled, because no matching handler was found in subrouters")
-                return request
-            }
-        // Else we just return the request itself, because it is 100% unhandled at this point
-        } else {
-            this.logger.debug("UNHANDLED: request was unhandled, because no matching handler was found")
-            return request
+        // Subrouters
+        for (const sub of this.subrouters) {
+            if (!pathMatchesPrefix(request.path, sub.fullPath)) continue
+            const r = await sub.handle(request)
+            if (r !== UNHANDLED) return this.runInterceptors(request, r)
         }
+
+        return UNHANDLED
     }
 
-    private async handleBySubrouters(request: Request, response: http.ServerResponse, requestPath: string): Promise<Request | boolean> {
-        let eventHandled: Request | boolean = request
-
-        for (const subrouter of this.subrouters) {
-            // Checking that this subrouter may possibly get this request, in terms of path
-            const subrouterFullPath = `${subrouter.dispatcherPath}${subrouter.rootPath}`
-
-            if (requestPath.startsWith(subrouterFullPath)) {
-                this.logger.debug(`* Checking in router ${subrouter.constructor.name}`)
-                eventHandled = await subrouter.handleEvent(request, response)
-                
-                // Check, if subrouter has found a matching handler. or it was stopped
-                if (typeof eventHandled !== "boolean") {
-                    break
-                }
-            }
+    private async runInterceptors(request: YasswsRequest, response: YasswsResponse): Promise<YasswsResponse> {
+        let r = response
+        for (const interceptor of this.responseInterceptors) {
+            r = await interceptor(request, r)
         }
-
-        return eventHandled
-    }
-
-    public async sendResponse(response: http.ServerResponse, handlerResponse: HandlerResponse, path: string): Promise<void> {
-        response.statusCode = handlerResponse.statusCode
-        response.setHeader('Location', path)
-        const datetimeGMT: string = (new Date()).toUTCString()
-        response.setHeader('Date', datetimeGMT)
-        response.setHeader('Content-Type', handlerResponse.contentType)
-        response.setHeader('Content-Length', handlerResponse.data.length)
-        
-        // Add user-provided headers
-        if (handlerResponse.headers) {
-            handlerResponse.headers.forEach((header) => {response.setHeader(header.name, header.data)})
-        }
-
-        // Add default headers
-        this.defaultHeaders.forEach((header) => {response.setHeader(header.name, header.data)})
-
-        response.end(handlerResponse.data)
+        return r
     }
 }
 
-function Route(path: string = "", method: Method | string = Method.GET, filters: Filter[] = []) {
-    return function (target: any, propertyKey: string, descriptor: PropertyDescriptor): PropertyDescriptor {
-        const handlerFunction = descriptor.value;
+function pathMatchesPrefix(reqPath: string, prefix: string): boolean {
+    if (reqPath === prefix) return true
+    if (reqPath.startsWith(prefix)) return true
+    if (prefix.endsWith("/") && reqPath === removeEndSlash(prefix)) return true
+    return false
+}
 
-        // Considering slash is a default location for a router, it shouldn't stack on the URL, because it
-        // doesn't contain any meaning - so it needs to be removed (replaced with empty path)
-        if (path == "/") {
-            path = ""
-        // Else, it just normalizes the path
-        } else {
-            path = normalizePath(path)
+function stripPrefix(reqPath: string, prefix: string): string {
+    if (reqPath === prefix || (prefix.endsWith("/") && reqPath === removeEndSlash(prefix))) return ""
+    return reqPath.slice(prefix.length)
+}
+
+function applyDefaultHeaders(response: YasswsResponse, defaults: Header[]): void {
+    for (const h of defaults) {
+        if (!response.headers.some(x => x.name.toLowerCase() === h.name.toLowerCase())) {
+            response.headers.push(h)
         }
+    }
+}
 
-        // Initializing handlers list in Router construcor, if it's undefined
-        target.constructor._handlers = target.constructor._handlers ??= []
-        let handlers: Handler[] = target.constructor._handlers
+function normalizeHandlerPath(p: string): string {
+    if (p === "" || p === "/") return ""
+    p = p.replace(/^\/+/, "").replace(/\/+$/, "")
+    return p
+}
 
-        // Adding handler
-        handlers.push({
-            path: path,
-            method: method,
-            filters: filters,
-            function: handlerFunction
-        });
+function joinPath(base: string, suffix: string): string {
+    if (!suffix) return base
+    return base.endsWith("/") ? `${base}${suffix}` : `${base}/${suffix}`
+}
 
-        return descriptor;
-    };
+/** Walk prototype chain and collect handlers registered via `@Route`. */
+function collectDecoratorHandlers(ctor: unknown): Handler[] {
+    const seen = new Set<string>()
+    const out: Handler[] = []
+    let c: unknown = ctor
+    while (c && (c as { prototype?: unknown }).prototype) {
+        const own = (c as { _handlers?: Handler[] })._handlers
+        if (own && Object.prototype.hasOwnProperty.call(c, "_handlers")) {
+            for (const h of own) {
+                const key = `${h.method} ${h.path}`
+                if (seen.has(key)) continue
+                seen.add(key)
+                out.push({ ...h })
+            }
+        }
+        c = Object.getPrototypeOf(c)
+    }
+    return out
+}
+
+async function resolveHandlerArgs(
+    fn: HandlerFunction,
+    meta: HandlerMetadata | undefined,
+    request: YasswsRequest,
+): Promise<unknown[]> {
+    if (!meta?.params || meta.params.length === 0) return [request]
+
+    const maxIndex = meta.params.reduce((m, p) => Math.max(m, p.index), 0)
+    const args: unknown[] = new Array(maxIndex + 1)
+
+    for (const p of meta.params) {
+        let value = await p.extract(request)
+        if (p.schema) {
+            try {
+                value = p.schema.parse(value)
+            } catch (err) {
+                const detail = err instanceof Error ? err.message : String(err)
+                throw new BadRequestError(`validation failed: ${detail}`, { cause: err })
+            }
+        }
+        args[p.index] = value
+    }
+    return args
+}
+
+async function runHandlerExceptionFilters(
+    meta: HandlerMetadata | undefined,
+    err: unknown,
+    request: YasswsRequest,
+): Promise<YasswsResponse | undefined> {
+    if (!meta?.exceptionFilters) return undefined
+    for (const filter of meta.exceptionFilters) {
+        const r = await filter.catch(err, request)
+        if (r instanceof YasswsResponse) return r
+    }
+    return undefined
+}
+
+function applyMethodDecoratorEffects(response: YasswsResponse, meta: HandlerMetadata | undefined): void {
+    if (!meta) return
+    if (meta.httpCode !== undefined && response.statusCode === 200) {
+        response.statusCode = meta.httpCode
+    }
+    if (meta.setHeaders) {
+        for (const h of meta.setHeaders) response.setHeader(h.name, h.value)
+    }
+}
+
+/**
+ * `@Route(path, method?, filters?)` — register a handler on the surrounding class.
+ *
+ * Back-compatible with v1: third positional argument may be a Filter[]. New code
+ * may pass an options object:
+ *
+ *     @Route("/:id", "GET", { filters: [auth], middlewares: [trace] })
+ */
+function Route(
+    path: string = "",
+    method: Method | string = Method.GET,
+    filtersOrOpts: Filter[] | { filters?: Filter[]; middlewares?: Middleware[] } = []
+) {
+    return function (target: object, _propertyKey: string, descriptor: PropertyDescriptor): PropertyDescriptor {
+        const handlerFunction = descriptor.value as HandlerFunction & { _filters?: Filter[]; _middlewares?: Middleware[] }
+        const normalizedPath = normalizeHandlerPath(path)
+
+        const fromDecorator = Array.isArray(filtersOrOpts)
+            ? { filters: filtersOrOpts, middlewares: [] as Middleware[] }
+            : { filters: filtersOrOpts.filters ?? [], middlewares: filtersOrOpts.middlewares ?? [] }
+
+        const filters = [...(handlerFunction._filters ?? []), ...fromDecorator.filters]
+        const middlewares = [...(handlerFunction._middlewares ?? []), ...fromDecorator.middlewares]
+
+        const ctor = (target as { constructor: { _handlers?: Handler[] } }).constructor
+        if (!Object.prototype.hasOwnProperty.call(ctor, "_handlers")) ctor._handlers = []
+        ctor._handlers!.push({
+            path: normalizedPath,
+            method: normalizeMethod(method),
+            filters,
+            middlewares,
+            function: handlerFunction,
+        })
+        return descriptor
+    }
 }
